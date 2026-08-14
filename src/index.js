@@ -3,12 +3,13 @@ import initialGameState from "./game_state.js"
 import { shuffle } from "./utils.js"
 import chalk from "chalk"
 import { select } from "@inquirer/prompts"
+import { handleExpiredQuestion } from "./question_timer.js"
 
 // string constants
 const CORRECT = "correct"
 const INCORRECT = "incorrect"
 // int constants
-const TIMER_DURATION = 2000
+const TIMER_DURATION = 10000
 
 const gameState = initialGameState
 
@@ -50,7 +51,7 @@ async function showMainMenu() {
 async function startGame() {
     // make sure there are still questions left
     // (checked redundantly so that the timer warning isn't shown if there are no questions)
-    await isQuestionRemaining() 
+    await isQuestionRemaining()
 
     // display timer warning
     console.log(chalk.red("You only have 10 seconds to answer each question!"))
@@ -62,72 +63,76 @@ async function startGame() {
     await askQuestion(gameState.currentQuestionIndex)
 }
 
-// Presents questions from current index
-async function askQuestion(questionIndex) {
-    // make sure there are still questions left
-    await isQuestionRemaining()
-
-    const questionTimer = setTimeout(() => {
-        console.log(chalk.red.bold("\nTimer expired!"))
-        console.log(chalk.yellow(`The correct answer was: ${currentQuestion.correctAnswer}`))
-        // increment stat and question index
-        gameState.stats.incorrectAnswers++
-        gameState.currentQuestionIndex++
-        // check for continue as usual
-        checkContinue()
-    }, TIMER_DURATION)
-
-    const currentQuestion = triviaDatabase[questionIndex]
-    // shuffle choices into an array
-    const choicesArray = shuffle([currentQuestion.correctAnswer, ...currentQuestion.wrongAnswers])
-    // map choices to names, and values to correctness
-    const choices = choicesArray.map((choice) => ({ name: choice, value: choice === currentQuestion.correctAnswer ? CORRECT : INCORRECT}))
-
-    // present question
-    const answer = await select({
-        message: chalk.bold(currentQuestion.question),
-        choices: choices
+async function checkContinue() {
+    const isContinue = await select({
+        message: "Continue or return to main menu?",
+        choices: [
+            { name: "Continue", value: "continue" },
+            { name: "Main Menu", value: "menu" }
+        ]
     })
 
-    // respond to answer, log stats
-    switch (answer) {
-        case CORRECT:
-            console.log(chalk.green("That's right!"))
-            gameState.stats.correctAnswers++
+    switch (isContinue) {
+        case "continue":
+            await askQuestion(gameState.currentQuestionIndex)
             break
-        case INCORRECT:
-            console.log(chalk.red("Incorrect!"))
-            console.log(chalk.yellow(`The correct answer was: ${currentQuestion.correctAnswer}`))
-            gameState.stats.incorrectAnswers++
+        case "menu":
+            await showMainMenu()
             break
     }
+}
 
-    // cancel timer
-    clearTimeout(questionTimer)
-    // increment index, check for continue
-    gameState.currentQuestionIndex++
-    checkContinue()
+// Presents questions from current index
+async function askQuestion(questionIndex) {
+    await isQuestionRemaining()
 
-    // ask if user wants to continue with the quiz
-    // it's a function so it can be called by the timer expiration as well
-    async function checkContinue() {
-        const isContinue = await select({
-            message: "Continue or return to main menu?",
-            choices: [
-                { name: "Continue", value: "continue" },
-                { name: "Main Menu", value: "menu" }
-            ]
-        })
+    const currentQuestion = triviaDatabase[questionIndex]
+    const choicesArray = shuffle([currentQuestion.correctAnswer, ...currentQuestion.wrongAnswers])
+    const choices = choicesArray.map((choice) => ({
+        name: choice,
+        value: choice === currentQuestion.correctAnswer ? CORRECT : INCORRECT
+    }))
 
-        // react to continue flag
-        switch (isContinue) {
-            case "continue":
-                await askQuestion(gameState.currentQuestionIndex)
+    const controller = new AbortController()
+    const questionTimer = setTimeout(() => {
+        controller.abort(new Error("Timer expired"))
+    }, TIMER_DURATION)
+
+    try {
+        const answer = await select(
+            {
+                message: chalk.bold(currentQuestion.question),
+                choices
+            },
+            { signal: controller.signal }
+        )
+
+        clearTimeout(questionTimer)
+
+        switch (answer) {
+            case CORRECT:
+                console.log(chalk.green("That's right!"))
+                gameState.stats.correctAnswers++
                 break
-            case "menu":
-                await showMainMenu()
+            case INCORRECT:
+                console.log(chalk.red("Incorrect!"))
+                console.log(chalk.yellow(`The correct answer was: ${currentQuestion.correctAnswer}`))
+                gameState.stats.incorrectAnswers++
                 break
         }
+
+        gameState.currentQuestionIndex++
+        await checkContinue()
+    } catch (error) {
+        clearTimeout(questionTimer)
+
+        if (error?.name === "AbortError" || error?.message === "Timer expired") {
+            handleExpiredQuestion(gameState, currentQuestion)
+            await checkContinue()
+            return
+        }
+
+        throw error
     }
 }
 
